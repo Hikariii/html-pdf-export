@@ -1,13 +1,12 @@
 import { sleep } from 'bun';
-import { type Logger as PinoLogger } from 'pino';
-import { type Logger, loggerUsingPino } from './logger.ts';
+import { type LoggerFactory, loggerUsingPino, PinoLogger } from './logger.ts';
 
 class ShutdownTimedOutError extends Error {
 }
 
 interface ShutdownOptions {
 	timeout?: number;
-	logger?: Logger;
+	logger?: LoggerFactory;
 }
 
 export function trapShutdown(callback: () => Promise<void>, options?: ShutdownOptions) {

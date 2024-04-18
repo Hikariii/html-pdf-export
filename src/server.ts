@@ -2,19 +2,57 @@ import { file } from 'bun';
 import { nanoid } from 'nanoid';
 import { mkdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'os';
+import { ReadableStream } from "stream/web";
 import { htmlToPdfClient, type HtmlToPdfClient } from './html-to-pdf-client.ts';
-import { type Logger, loggerUsingPino } from './logger.ts';
+import { type LoggerFactory, loggerUsingPino, PinoLogger } from './logger.ts';
 
 export interface CreateServerOptions {
 	port?: number;
-	logger?: Logger;
+	logger?: LoggerFactory;
 	htmlToPdfClient?: HtmlToPdfClient;
 }
 
-export const createServer = (options?: CreateServerOptions) => {
+const convertHtmlToPdf = async(
+	requestBody: ReadableStream,
+	requestId: string,
+	tmpDir: string,
+	client: HtmlToPdfClient,
+	logger: PinoLogger
+) => {
+	const outputPath = `${tmpDir}/${requestId}.pdf`;
+	const inputPath = `${tmpDir}/${requestId}.html`;
+
+	logger.info(`Writing request body to file: ${inputPath}`);
+	await Bun.write(inputPath, await Bun.readableStreamToBlob(requestBody));
+
+	const startTime = process.hrtime();
+
+	await client(inputPath, outputPath, logger);
+
+	const duration = process.hrtime(startTime);
+	logger.info(`Done converting HTML to PDF in ${duration}`);
+
+	const pdfOutput = file(outputPath);
+	logger.info(`created output size: ${pdfOutput.size}`);
+
+	pdfOutput.stream().getReader().closed.then(async() => {
+		await unlink(outputPath);
+		await unlink(inputPath);
+	});
+
+	return pdfOutput;
+};
+
+export const createServer = async(options?: CreateServerOptions) => {
 	const port = options?.port ?? 8000;
 	const logger = options?.logger?.() ?? loggerUsingPino();
 	const client = options?.htmlToPdfClient ?? htmlToPdfClient;
+
+	const tmpDir = process.env.HTML_PDF_EXPORT_TMPDIR ?? tmpdir();
+	if (!(await file(tmpDir).exists())) {
+		logger.info('Temporary file directory not found, creating a new directory');
+		await mkdir(tmpDir, {recursive: true});
+	}
 
 	logger.info(`Listening on port ${port}...`);
 
@@ -44,23 +82,15 @@ export const createServer = (options?: CreateServerOptions) => {
 				return new Response(null, {status: 400});
 			}
 
-			const tmpDir = process.env.HTML_PDF_EXPORT_TMPDIR ?? tmpdir();
-			if (!(await file(tmpDir).exists())) {
-				logger.info('Temporary file directory not found, creating a new directory');
-				await mkdir(tmpDir, {recursive: true});
-			}
+			const pdfOutput = await convertHtmlToPdf(
+				req.body,
+				requestId,
+				tmpDir,
+				client,
+				logger,
+			);
 
-			const outputPath = `${tmpDir}/${requestId}.pdf`;
-			const contentLength = req.headers.get('content-length');
-			logger.info('Starting conversion of HTML to PDF', {contentLength});
-			const startTime = process.hrtime();
-			await client(req, outputPath);
-			const duration = process.hrtime(startTime);
-			logger.info('Done converting HTML to PDF', {contentLength, duration});
-
-			const output = file(outputPath);
-			output.stream().getReader().closed.then(() => unlink(outputPath));
-			return new Response(output, {status: 200, headers: {'content-type': 'application/pdf'}});
+			return new Response(pdfOutput, {status: 200, headers: {'content-type': 'application/pdf'}});
 		},
 		error(err) {
 			logger.error(err);
